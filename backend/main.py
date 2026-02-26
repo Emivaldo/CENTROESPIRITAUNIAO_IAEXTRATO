@@ -39,7 +39,7 @@ def get_transactions() -> Dict[str, Any]:
     arq_resp = supabase.table("ceu_arquivos_importados").select("*").order("data_importacao", desc=True).execute()
     files_summary = arq_resp.data if arq_resp.data else []
     
-    lanc_resp = supabase.table("ceu_lancamentos").select("*, ceu_arquivos_importados!inner(nome_arquivo)").order("data_transacao", desc=True).limit(1000).execute()
+    lanc_resp = supabase.table("ceu_lancamentos").select("*, ceu_arquivos_importados!inner(nome_arquivo), ceu_departamentos(nome)").order("data_transacao", desc=True).limit(5000).execute()
     raw_lanc = lanc_resp.data if lanc_resp.data else []
     
     transactions = []
@@ -56,6 +56,10 @@ def get_transactions() -> Dict[str, Any]:
             val_signed = val
             total_receitas += val
             
+        dep_nome = None
+        if l.get("ceu_departamentos") and l["ceu_departamentos"].get("nome"):
+            dep_nome = l["ceu_departamentos"]["nome"]
+        
         transactions.append({
             "id_codigo": l["id_codigo"],
             "data": format_date_br(l["data_transacao"]),
@@ -64,7 +68,8 @@ def get_transactions() -> Dict[str, Any]:
             "tipo_movimento": tipo,
             "valor": val_signed,
             "status": l["status"],
-            "arquivo": l["ceu_arquivos_importados"]["nome_arquivo"] if "ceu_arquivos_importados" in l else "Desconhecido"
+            "arquivo": l["ceu_arquivos_importados"]["nome_arquivo"] if "ceu_arquivos_importados" in l else "Desconhecido",
+            "departamento_destino": dep_nome
         })
         
     saldo_geral = total_receitas + total_despesas
@@ -97,6 +102,69 @@ def get_transactions() -> Dict[str, Any]:
         "transactions": transactions,
         "files_summary": formatted_files
     }
+
+@app.get("/api/lancamentos/sem-departamento")
+def get_lancamentos_sem_departamento():
+    resp = supabase.table("ceu_lancamentos").select("*, ceu_arquivos_importados!inner(nome_arquivo)").is_("id_departamento", "null").order("data_transacao", desc=True).limit(500).execute()
+    raw_lanc = resp.data if resp.data else []
+    transactions = []
+    
+    for l in raw_lanc:
+        val = l["valor_absoluto"]
+        tipo = l["tipo_movimento"]
+        val_signed = val if tipo == "Receita" else -val
+            
+        transactions.append({
+            "id_codigo": l["id_codigo"],
+            "data": format_date_br(l["data_transacao"]),
+            "historico": l["historico_banco"],
+            "detalhes": l["detalhes_complementares"],
+            "tipo_movimento": tipo,
+            "valor": val_signed,
+            "status": l["status"],
+            "arquivo": l["ceu_arquivos_importados"]["nome_arquivo"] if "ceu_arquivos_importados" in l else "Desconhecido"
+        })
+    return transactions
+
+
+# ─── DEPARTAMENTOS ─────────────────────────────────────────
+
+@app.get("/api/departamentos")
+def get_departamentos():
+    resp = supabase.table("ceu_departamentos").select("*").order("nome", desc=False).execute()
+    return resp.data if resp.data else []
+
+@app.post("/api/departamentos")
+def create_departamento(departamento: Dict[str, Any]):
+    insert = {
+        "nome": departamento.get("nome", ""),
+        "tipo": departamento.get("tipo", "misto"),
+        "ativo": departamento.get("ativo", True)
+    }
+    resp = supabase.table("ceu_departamentos").insert(insert).execute()
+    if resp.data:
+        return resp.data[0]
+    raise HTTPException(status_code=500, detail="Erro ao criar departamento.")
+
+@app.put("/api/departamentos/{departamento_id}")
+def update_departamento(departamento_id: int, departamento: Dict[str, Any]):
+    update = {}
+    if "nome" in departamento:
+        update["nome"] = departamento["nome"]
+    if "tipo" in departamento:
+        update["tipo"] = departamento["tipo"]
+    if "ativo" in departamento:
+        update["ativo"] = departamento["ativo"]
+    
+    resp = supabase.table("ceu_departamentos").update(update).eq("id_codigo", departamento_id).execute()
+    if resp.data:
+        return resp.data[0]
+    raise HTTPException(status_code=404, detail="Departamento não encontrado.")
+
+@app.delete("/api/departamentos/{departamento_id}")
+def delete_departamento(departamento_id: int):
+    resp = supabase.table("ceu_departamentos").delete().eq("id_codigo", departamento_id).execute()
+    return {"ok": True}
 
 # ─── REGRAS DO EXTRATO ─────────────────────────────────────
 
@@ -138,6 +206,172 @@ def update_regra(regra_id: int, regra: Dict[str, Any]):
 def delete_regra(regra_id: int):
     resp = supabase.table("ceu_regras_extrato").delete().eq("id_codigo", regra_id).execute()
     return {"ok": True}
+
+@app.post("/api/regras/{regra_id}/executar")
+def executar_regra(regra_id: int):
+    regra_resp = supabase.table("ceu_regras_extrato").select("*").eq("id_codigo", regra_id).execute()
+    if not regra_resp.data:
+        raise HTTPException(status_code=404, detail="Regra não encontrada")
+    regra = regra_resp.data[0]
+    
+    if not regra.get("ativo", True):
+        raise HTTPException(status_code=400, detail="A regra está inativa")
+        
+    dep_nome = regra.get("departamento_destino")
+    if not dep_nome:
+        raise HTTPException(status_code=400, detail="Regra sem departamento de destino")
+        
+    dep_resp = supabase.table("ceu_departamentos").select("id_codigo").eq("nome", dep_nome).execute()
+    if not dep_resp.data:
+        raise HTTPException(status_code=404, detail=f"Departamento '{dep_nome}' não encontrado")
+    id_dep = dep_resp.data[0]["id_codigo"]
+    
+    lanc_resp = supabase.table("ceu_lancamentos").select("*").is_("id_departamento", "null").execute()
+    lancamentos = lanc_resp.data if lanc_resp.data else []
+    
+    ids_to_update = []
+    
+    for l in lancamentos:
+        match = True
+        if regra.get("contem_historico"):
+            if regra["contem_historico"].lower() not in l["historico_banco"].lower():
+                match = False
+        if match and regra.get("contem_detalhes"):
+            detalhes = l.get("detalhes_complementares") or ""
+            if regra["contem_detalhes"].lower() not in detalhes.lower():
+                match = False
+        if match and regra.get("tipo_movimento"):
+            if regra["tipo_movimento"] != l["tipo_movimento"]:
+                match = False
+        if match and regra.get("valores_exatos"):
+            v_exatos = [float(v.strip().replace(',', '.')) for v in regra["valores_exatos"].split(",")]
+            if l["valor_absoluto"] not in v_exatos:
+                match = False
+                
+        if match:
+            ids_to_update.append(l["id_codigo"])
+            
+    if ids_to_update:
+        # Supabase allows updating with .in_()
+        supabase.table("ceu_lancamentos").update({"id_departamento": id_dep, "status": "conciliado"}).in_("id_codigo", ids_to_update).execute()
+        
+    return {"ok": True, "updated": len(ids_to_update)}
+
+@app.post("/api/regras/executar-multiplas")
+def executar_multiplas_regras(payload: Dict[str, Any]):
+    regra_ids = payload.get("regra_ids", [])
+    if not regra_ids:
+        raise HTTPException(status_code=400, detail="Missing regra_ids")
+        
+    # Pick all active rules from the requested list, order by priority
+    regras_resp = supabase.table("ceu_regras_extrato").select("*").in_("id_codigo", regra_ids).eq("ativo", True).order("prioridade", desc=False).execute()
+    regras = regras_resp.data if regras_resp.data else []
+    
+    if not regras:
+        return {"ok": True, "updated": 0, "message": "Nenhuma regra ativa selecionada."}
+        
+    total_atualizados = 0
+    
+    # Processa cada regra, uma a uma
+    for regra in regras:
+        dep_nome = regra.get("departamento_destino")
+        if not dep_nome:
+            continue
+            
+        dep_resp = supabase.table("ceu_departamentos").select("id_codigo").eq("nome", dep_nome).execute()
+        if not dep_resp.data:
+            continue
+        id_dep = dep_resp.data[0]["id_codigo"]
+        
+        # O banco de dados vai mudar, pegamos os PENDENTES (que ainda tem null) NOVAMENTE
+        # Assim garantimos uma hierarquia real onde regras mais prioritárias "roubam" os registros primeiro
+        lanc_resp = supabase.table("ceu_lancamentos").select("*").is_("id_departamento", "null").execute()
+        lancamentos = lanc_resp.data if lanc_resp.data else []
+        
+        if not lancamentos:
+            break # Não há mais nada pendente!
+            
+        ids_to_update = []
+        for l in lancamentos:
+            match = True
+            if regra.get("contem_historico"):
+                if regra["contem_historico"].lower() not in l["historico_banco"].lower():
+                    match = False
+            if match and regra.get("contem_detalhes"):
+                detalhes = l.get("detalhes_complementares") or ""
+                if regra["contem_detalhes"].lower() not in detalhes.lower():
+                    match = False
+            if match and regra.get("tipo_movimento"):
+                if regra["tipo_movimento"] != l["tipo_movimento"]:
+                    match = False
+            if match and regra.get("valores_exatos"):
+                try:
+                    v_exatos = [float(v.strip().replace(',', '.')) for v in regra["valores_exatos"].split(",")]
+                    if l["valor_absoluto"] not in v_exatos:
+                        match = False
+                except:
+                    match = False # Prevenindo erros de parse em virgulas quebradas no JSON/DB
+                    
+            if match:
+                ids_to_update.append(l["id_codigo"])
+                
+        if ids_to_update:
+            supabase.table("ceu_lancamentos").update({"id_departamento": id_dep, "status": "conciliado"}).in_("id_codigo", ids_to_update).execute()
+            total_atualizados += len(ids_to_update)
+            
+    return {"ok": True, "updated": total_atualizados}
+
+@app.post("/api/lancamentos/bulk-departamento")
+def bulk_update_departamento(payload: Dict[str, Any]):
+    lanc_ids = payload.get("lancamento_ids", [])
+    dep_id = payload.get("departamento_id")
+    if not lanc_ids or not dep_id:
+        raise HTTPException(status_code=400, detail="Missing lancamento_ids or departamento_id")
+        
+    resp = supabase.table("ceu_lancamentos").update({"id_departamento": dep_id, "status": "conciliado"}).in_("id_codigo", lanc_ids).execute()
+    
+    # Após aplicar para todos selecionados, vamos varrer os lançamentos buscar CNPJ/CPF
+    # e criar as regras genéricas.
+    lanc_docs_resp = supabase.table("ceu_lancamentos").select("detalhes_complementares, tipo_movimento").in_("id_codigo", lanc_ids).execute()
+    dep_nome_resp = supabase.table("ceu_departamentos").select("nome").eq("id_codigo", dep_id).execute()
+    
+    regras_criadas = 0
+    if lanc_docs_resp.data and dep_nome_resp.data:
+        dep_nome = dep_nome_resp.data[0]["nome"]
+        
+        # Guardaremos os documentos associados a qual tipo_movimento encontraram primeiro
+        docs_info = {}
+        
+        # Regex básico para CPF (xxx.xxx.xxx-xx) ou CNPJ (xx.xxx.xxx/xxxx-xx) - formatos padronizados de banco
+        doc_pattern = re.compile(r'(\d{2,3}\.\d{3}\.\d{3}\/?\d{0,4}-\d{2})')
+        
+        for l in lanc_docs_resp.data:
+            detalhes = l.get("detalhes_complementares") or ""
+            tipo = l.get("tipo_movimento")
+            matches = doc_pattern.findall(detalhes)
+            for m in matches:
+                # Armazena o CPF/CNPJ. Se já tiver, mantém (poderíamos ter múltiplos tipos, mas usualmente é o mesmo pernecente)
+                if m not in docs_info:
+                    docs_info[m] = tipo
+                
+        # Para cada documento único, criar regra se já não existir
+        for doc, tipo_mov in docs_info.items():
+            check_regra = supabase.table("ceu_regras_extrato").select("id_codigo").eq("contem_detalhes", doc).execute()
+            if not check_regra.data:
+                insert_regra = {
+                    "nome_regra": dep_nome,
+                    "contem_historico": None,
+                    "contem_detalhes": doc,
+                    "tipo_movimento": tipo_mov,
+                    "valores_exatos": None,
+                    "departamento_destino": dep_nome,
+                    "ativo": True,
+                    "prioridade": 10 # Prioridade baixa pra Regra Automatica de Massa
+                }
+                supabase.table("ceu_regras_extrato").insert(insert_regra).execute()
+                regras_criadas += 1
+
+    return {"ok": True, "updated": len(lanc_ids), "regras_criadas": regras_criadas}
 
 @app.post("/api/upload")
 async def upload_files(files: List[UploadFile] = File(...)):
