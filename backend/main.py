@@ -39,7 +39,7 @@ def get_transactions() -> Dict[str, Any]:
     arq_resp = supabase.table("ceu_arquivos_importados").select("*").order("data_importacao", desc=True).execute()
     files_summary = arq_resp.data if arq_resp.data else []
     
-    lanc_resp = supabase.table("ceu_lancamentos").select("*, ceu_arquivos_importados!inner(nome_arquivo), ceu_departamentos(nome)").order("data_transacao", desc=True).limit(5000).execute()
+    lanc_resp = supabase.table("ceu_lancamentos").select("*, ceu_arquivos_importados!inner(nome_arquivo), ceu_departamentos(*)").order("data_transacao", desc=True).limit(5000).execute()
     raw_lanc = lanc_resp.data if lanc_resp.data else []
     
     transactions = []
@@ -57,8 +57,10 @@ def get_transactions() -> Dict[str, Any]:
             total_receitas += val
             
         dep_nome = None
+        faz_parte = True
         if l.get("ceu_departamentos") and l["ceu_departamentos"].get("nome"):
             dep_nome = l["ceu_departamentos"]["nome"]
+            faz_parte = l["ceu_departamentos"].get("faz_parte_movimento", True)
         
         transactions.append({
             "id_codigo": l["id_codigo"],
@@ -69,7 +71,8 @@ def get_transactions() -> Dict[str, Any]:
             "valor": val_signed,
             "status": l["status"],
             "arquivo": l["ceu_arquivos_importados"]["nome_arquivo"] if "ceu_arquivos_importados" in l else "Desconhecido",
-            "departamento_destino": dep_nome
+            "departamento_destino": dep_nome,
+            "faz_parte_movimento": faz_parte
         })
         
     saldo_geral = total_receitas + total_despesas
@@ -139,7 +142,8 @@ def create_departamento(departamento: Dict[str, Any]):
     insert = {
         "nome": departamento.get("nome", ""),
         "tipo": departamento.get("tipo", "misto"),
-        "ativo": departamento.get("ativo", True)
+        "ativo": departamento.get("ativo", True),
+        "faz_parte_movimento": departamento.get("faz_parte_movimento", True)
     }
     resp = supabase.table("ceu_departamentos").insert(insert).execute()
     if resp.data:
@@ -155,6 +159,8 @@ def update_departamento(departamento_id: int, departamento: Dict[str, Any]):
         update["tipo"] = departamento["tipo"]
     if "ativo" in departamento:
         update["ativo"] = departamento["ativo"]
+    if "faz_parte_movimento" in departamento:
+        update["faz_parte_movimento"] = departamento["faz_parte_movimento"]
     
     resp = supabase.table("ceu_departamentos").update(update).eq("id_codigo", departamento_id).execute()
     if resp.data:
@@ -611,6 +617,118 @@ async def upload_files(files: List[UploadFile] = File(...)):
             results.append({"filename": file.filename, "status": "error", "message": str(e)})
 
     return {"results": results}
+
+# ─── CONCILIAÇÃO — MANUTENÇÃO DE LANÇAMENTOS ─────────────────
+
+@app.get("/api/conciliacao/lancamentos")
+def get_conciliacao_lancamentos(
+    historico: str = "",
+    detalhes: str = "",
+    tipo: str = "",
+    departamento: str = "",
+    status: str = "",
+    data_de: str = "",
+    data_ate: str = "",
+    page: int = 1,
+    per_page: int = 50
+):
+    """Busca lançamentos com filtros avançados para a tela de Conciliação."""
+    query = supabase.table("ceu_lancamentos").select(
+        "*, ceu_arquivos_importados!inner(nome_arquivo), ceu_departamentos(id_codigo, nome)",
+        count="exact"
+    )
+    
+    if historico:
+        query = query.ilike("historico_banco", f"%{historico}%")
+    if detalhes:
+        query = query.ilike("detalhes_complementares", f"%{detalhes}%")
+    if tipo:
+        query = query.eq("tipo_movimento", tipo)
+    if status:
+        query = query.eq("status", status)
+    if data_de:
+        query = query.gte("data_transacao", data_de)
+    if data_ate:
+        query = query.lte("data_transacao", data_ate)
+    if departamento == "__null__":
+        query = query.is_("id_departamento", "null")
+    elif departamento:
+        dep_resp = supabase.table("ceu_departamentos").select("id_codigo").eq("nome", departamento).execute()
+        if dep_resp.data:
+            query = query.eq("id_departamento", dep_resp.data[0]["id_codigo"])
+        else:
+            return {"lancamentos": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+    
+    offset = (page - 1) * per_page
+    query = query.order("data_transacao", desc=True).range(offset, offset + per_page - 1)
+    
+    resp = query.execute()
+    raw = resp.data if resp.data else []
+    total = resp.count if resp.count else 0
+    
+    lancamentos = []
+    for l in raw:
+        val = l["valor_absoluto"]
+        tipo_mov = l["tipo_movimento"]
+        val_signed = val if tipo_mov == "Receita" else -val
+        
+        dep_nome = None
+        dep_id = l.get("id_departamento")
+        if l.get("ceu_departamentos") and l["ceu_departamentos"].get("nome"):
+            dep_nome = l["ceu_departamentos"]["nome"]
+        
+        lancamentos.append({
+            "id_codigo": l["id_codigo"],
+            "data": format_date_br(l["data_transacao"]),
+            "data_iso": l["data_transacao"],
+            "historico": l["historico_banco"],
+            "detalhes": l["detalhes_complementares"],
+            "tipo_movimento": tipo_mov,
+            "valor": val_signed,
+            "valor_absoluto": val,
+            "status": l["status"],
+            "arquivo": l["ceu_arquivos_importados"]["nome_arquivo"] if "ceu_arquivos_importados" in l else "Desconhecido",
+            "departamento_destino": dep_nome,
+            "id_departamento": dep_id
+        })
+    
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+    
+    return {
+        "lancamentos": lancamentos,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages
+    }
+
+
+@app.put("/api/lancamentos/{lancamento_id}")
+def update_lancamento(lancamento_id: int, payload: Dict[str, Any]):
+    """Atualiza departamento e/ou status de um lançamento individual."""
+    update = {}
+    
+    if "id_departamento" in payload:
+        dep_id = payload["id_departamento"]
+        if dep_id is None or dep_id == "" or dep_id == 0:
+            update["id_departamento"] = None
+            update["status"] = "pendente"
+        else:
+            update["id_departamento"] = int(dep_id)
+            if "status" not in payload:
+                update["status"] = "conciliado"
+    
+    if "status" in payload:
+        update["status"] = payload["status"]
+    
+    if not update:
+        raise HTTPException(status_code=400, detail="Nada para atualizar.")
+    
+    resp = supabase.table("ceu_lancamentos").update(update).eq("id_codigo", lancamento_id).execute()
+    if resp.data:
+        return {"ok": True, "updated": resp.data[0]}
+    raise HTTPException(status_code=404, detail="Lançamento não encontrado.")
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

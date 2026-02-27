@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import {
-  LineChart as LucideLineChart, Wallet, Users, MapPin, Pizza, BarChart, Settings, Check, Folder, Search, X, CheckSquare, BookOpen, Plus, Trash2, ToggleLeft, ToggleRight
+  LineChart as LucideLineChart, Wallet, Users, MapPin, Pizza, BarChart, Settings, Check, Folder, Search, X, CheckSquare, BookOpen, Plus, Trash2, ToggleLeft, ToggleRight, Edit2, ChevronLeft, ChevronRight, Save, RefreshCw
 } from 'lucide-react';
-import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
+import { BarChart as RechartsBarChart, Bar, LineChart as RechartsLineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import './index.css';
 
 // ─── OVERLAY DE CARREGAMENTO ──────────────────────────────
@@ -52,7 +52,7 @@ function App() {
 
   // Departamentos
   const [departamentos, setDepartamentos] = useState([]);
-  const emptyDepartamento = { nome: '', tipo: 'misto', ativo: true };
+  const emptyDepartamento = { nome: '', tipo: 'misto', ativo: true, faz_parte_movimento: true };
   const [novoDepartamento, setNovoDepartamento] = useState(emptyDepartamento);
   const [editandoDepartamento, setEditandoDepartamento] = useState(null);
   const [salvandoDepartamento, setSalvandoDepartamento] = useState(false);
@@ -79,6 +79,26 @@ function App() {
   const [itemsPerPagePendentes, setItemsPerPagePendentes] = useState(30);
   const [sortFieldPendentes, setSortFieldPendentes] = useState('data');
   const [sortOrderPendentes, setSortOrderPendentes] = useState('desc');
+
+  // Conciliação
+  const emptyConcFiltros = { historico: '', detalhes: '', tipo: '', departamento: '', status: '', data_de: '', data_ate: '' };
+  const [concFiltros, setConcFiltros] = useState(emptyConcFiltros);
+  const [concData, setConcData] = useState({ lancamentos: [], total: 0, page: 1, per_page: 50, total_pages: 0 });
+  const [concPage, setConcPage] = useState(1);
+  const [concPerPage, setConcPerPage] = useState(50);
+  const [concLoading, setConcLoading] = useState(false);
+  const [concEditingId, setConcEditingId] = useState(null);
+  const [concEditDep, setConcEditDep] = useState('');
+  const [concEditStatus, setConcEditStatus] = useState('');
+  const [concSaving, setConcSaving] = useState(false);
+  const [concSelecionados, setConcSelecionados] = useState([]);
+  const [concBulkDep, setConcBulkDep] = useState('');
+
+  // Dashboard - Guias e Filtros
+  const [dashAba, setDashAba] = useState('resumo'); // 'resumo', 'anual', 'detalhado'
+  const [dashAno, setDashAno] = useState('Todos'); // default
+  const [dashConta, setDashConta] = useState('Todas');
+  const [dashDepSelecionado, setDashDepSelecionado] = useState(null);
 
   useEffect(() => { fetchData(); }, []);
 
@@ -179,7 +199,6 @@ function App() {
     { icon: <Wallet size={18} />, label: "Dashboard" },
     { icon: <Folder size={18} />, label: "Arquivos" },
     { icon: <Users size={18} />, label: "Departamento" },
-    { icon: <Pizza size={18} />, label: "Lançamentos" },
     { icon: <BookOpen size={18} />, label: "Regras do Extrato" },
     { icon: <CheckSquare size={18} />, label: "Conciliação" },
     { icon: <BarChart size={18} />, label: "Relatórios" },
@@ -222,6 +241,8 @@ function App() {
       if (lancamentosSemDep.length === 0) fetchLanc();
     } else if (currentMenu === 'Departamento') {
       if (departamentos.length === 0) fetchDeps();
+    } else if (currentMenu === 'Conciliação') {
+      if (departamentos.length === 0) fetchDeps();
     }
 
     return () => { active = false; };
@@ -252,10 +273,32 @@ function App() {
   // ─── DASHBOARD ──────────────────────────────────────────
   const renderDashboard = () => {
 
-    // Aggregations by department
+    // ─── Anos e Contas Disponíveis ───
+    const anosDisponiveis = Array.from(new Set(transactions.filter(t => t.faz_parte_movimento !== false && t.data).map(t => {
+      const parts = t.data.split('/');
+      return parts.length >= 3 ? parts[2].trim().substring(0, 4) : null;
+    }).filter(Boolean))).sort().reverse();
+
+    const contasDisponiveis = Array.from(new Set(transactions.filter(t => t.faz_parte_movimento !== false && t.conta).map(t => t.conta))).sort();
+
+    // ─── Dados Base p/ Dashboard ───
+    let transacoesMovimento = transactions.filter(t => t.faz_parte_movimento !== false);
+
+    if (dashConta !== 'Todas') {
+      transacoesMovimento = transacoesMovimento.filter(t => t.conta === dashConta);
+    }
+    if (dashAno !== 'Todos') {
+      transacoesMovimento = transacoesMovimento.filter(t => {
+        if (!t.data) return false;
+        const parts = t.data.split('/');
+        return parts.length >= 3 && parts[2].trim().substring(0, 4) === dashAno;
+      });
+    }
+
+    // Aggregations by department (exclui departamentos que não fazem parte do movimento)
     const depAgg = {};
 
-    transactions.forEach(t => {
+    transacoesMovimento.forEach(t => {
       const dep = t.departamento_destino || 'Sem Departamento';
       if (!depAgg[dep]) depAgg[dep] = { receitas: 0, despesas: 0, count: 0 };
       depAgg[dep].count++;
@@ -266,15 +309,46 @@ function App() {
       }
     });
 
-    const chartData = Object.entries(depAgg)
-      .map(([dep, g]) => ({
-        name: dep.length > 22 ? dep.substring(0, 20) + '...' : dep,
-        fullName: dep,
-        Despesas: parseFloat(g.despesas.toFixed(2)),
-        Receitas: parseFloat(g.receitas.toFixed(2))
-      }))
-      .sort((a, b) => b.Despesas - a.Despesas)
-      .slice(0, 12);
+    const dashTabStyles = (tab) => ({
+      padding: '0.75rem 1.5rem',
+      background: dashAba === tab ? 'white' : 'transparent',
+      color: dashAba === tab ? 'var(--primary)' : 'var(--text-muted)',
+      borderBottom: dashAba === tab ? '3px solid var(--primary)' : '3px solid transparent',
+      cursor: 'pointer',
+      fontWeight: dashAba === tab ? 700 : 600,
+      fontSize: '0.875rem',
+      transition: 'all 0.2s'
+    });
+
+    // ─── Dados Anuais ───
+    const depAnoData = Object.entries(depAgg).map(([dep, g]) => ({ dep, ...g }));
+
+    // ─── Dados Detalhados ───
+    const depsDisponiveis = Array.from(new Set(transacoesMovimento.map(t => t.departamento_destino || 'Sem Departamento'))).sort();
+
+    // Lançamentos específicos do departamento
+    const transacoesDep = dashDepSelecionado
+      ? transacoesMovimento.filter(t => (t.departamento_destino || 'Sem Departamento') === dashDepSelecionado)
+      : [];
+
+    const depDetalhamentoRec = transacoesDep.filter(t => t.tipo_movimento === 'Receita').reduce((s, t) => s + Math.abs(t.valor), 0);
+    const depDetalhamentoDesp = transacoesDep.filter(t => t.tipo_movimento === 'Despesa').reduce((s, t) => s + Math.abs(t.valor), 0);
+    const depDetalhamentoSaldo = depDetalhamentoRec - depDetalhamentoDesp;
+
+    // Dados do Gráfico de Linha do Departamento
+    const mesesAbrev = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+    const depChartData = mesesAbrev.map((m) => ({ name: m, Receitas: 0, Despesas: 0 }));
+    transacoesDep.forEach(t => {
+      if (!t.data) return;
+      const parts = t.data.split('/');
+      if (parts.length >= 2) {
+        const mIndex = parseInt(parts[1], 10) - 1;
+        if (mIndex >= 0 && mIndex <= 11) {
+          if (t.tipo_movimento === 'Receita') depChartData[mIndex].Receitas += Math.abs(t.valor);
+          else if (t.tipo_movimento === 'Despesa') depChartData[mIndex].Despesas += Math.abs(t.valor);
+        }
+      }
+    });
 
     const depTableData = Object.entries(depAgg)
       .map(([dep, g]) => ({ ...g, dep, saldo: g.receitas - g.despesas }))
@@ -289,76 +363,292 @@ function App() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
           <div className="metric-card blue">
             <div className="metric-title">Saldo Geral</div>
-            <div className="metric-value">{currentValStr}</div>
+            <div className="metric-value">{BRL(totalGlobalSaldo)}</div>
           </div>
           <div className="metric-card green">
             <div className="metric-title">Total Receitas</div>
-            <div className="metric-value" style={{ color: 'var(--green)' }}>{receitasStr}</div>
+            <div className="metric-value" style={{ color: 'var(--green)' }}>{BRL(totalGlobalRec)}</div>
           </div>
           <div className="metric-card orange">
             <div className="metric-title">Total Despesas</div>
-            <div className="metric-value" style={{ color: 'var(--red)' }}>{BRL(resumo.total_despesas)}</div>
+            <div className="metric-value" style={{ color: 'var(--red)' }}>{BRL(-totalGlobalDesp)}</div>
           </div>
           <div className="metric-card blue2">
             <div className="metric-title">Transações</div>
-            <div className="metric-value" style={{ fontSize: '1.6rem' }}>{transactions.length}</div>
+            <div className="metric-value" style={{ fontSize: '1.6rem' }}>{transacoesMovimento.length}</div>
           </div>
         </div>
 
-        {/* Gráfico horizontal */}
-        <div className="panel">
-          <div className="panel-header panel-header-green">
-            <BarChart size={16} /> Despesas vs Receitas — Top 12 Departamentos
-          </div>
-          <div style={{ height: Math.max(300, chartData.length * 40 + 60), marginTop: '1rem' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <RechartsBarChart data={chartData} layout="vertical" margin={{ top: 10, right: 30, left: 130, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E5E7EB" />
-                <XAxis type="number" tickFormatter={(val) => BRL(val)} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} />
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#374151', fontWeight: 600 }} axisLine={false} tickLine={false} width={130} />
-                <Tooltip formatter={(value) => BRL(value)} cursor={{ fill: '#F3F4F6' }} />
-                <Legend iconType="circle" />
-                <Bar dataKey="Despesas" fill="#EF4444" radius={[0, 4, 4, 0]} maxBarSize={22} />
-                <Bar dataKey="Receitas" fill="#10B981" radius={[0, 4, 4, 0]} maxBarSize={22} />
-              </RechartsBarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
 
-        {/* Tabela Resumo */}
-        <div className="panel" style={{ overflowX: 'auto' }}>
-          <div className="panel-header panel-header-orange">
-            <Users size={16} /> Resumo Acumulado por Departamento
+
+        {/* Painel com Abas de Resumo */}
+        <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: '#f9fafb' }}>
+            <div style={dashTabStyles('resumo')} onClick={() => setDashAba('resumo')}>Resumo Acumulado</div>
+            <div style={dashTabStyles('anual')} onClick={() => setDashAba('anual')}>Visão Anual</div>
+            <div style={dashTabStyles('detalhado')} onClick={() => setDashAba('detalhado')}>Detalhamento por Dep.</div>
           </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem', fontSize: '0.84rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '2px solid var(--border-color)', textAlign: 'left', color: 'var(--text-muted)' }}>
-                <th style={{ padding: '0.6rem 0.5rem' }}>Departamento</th>
-                <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center' }}>Transações</th>
-                <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Receitas</th>
-                <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Despesas</th>
-                <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Saldo</th>
-              </tr>
-            </thead>
-            <tbody>
-              {depTableData.map((d, idx) => (
-                <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                  <td style={{ padding: '0.65rem 0.5rem', fontWeight: 600 }}>{d.dep}</td>
-                  <td style={{ padding: '0.65rem 0.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>{d.count}</td>
-                  <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--green)' }}>{BRL(d.receitas)}</td>
-                  <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--red)' }}>{BRL(d.despesas)}</td>
-                  <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 700, color: d.saldo >= 0 ? 'var(--green)' : 'var(--red)' }}>{BRL(d.saldo)}</td>
-                </tr>
-              ))}
-              <tr style={{ borderTop: '3px solid var(--primary)', background: '#f9fafb' }}>
-                <td style={{ padding: '0.8rem 0.5rem', fontWeight: 800, color: 'var(--primary)', fontSize: '0.9rem' }}>TOTAL GERAL</td>
-                <td style={{ padding: '0.8rem 0.5rem', textAlign: 'center', fontWeight: 700 }}>{depTableData.reduce((s, d) => s + d.count, 0)}</td>
-                <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: 'var(--green)', fontSize: '0.9rem' }}>{BRL(totalGlobalRec)}</td>
-                <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: 'var(--red)', fontSize: '0.9rem' }}>{BRL(totalGlobalDesp)}</td>
-                <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: totalGlobalSaldo >= 0 ? 'var(--green)' : 'var(--red)', fontSize: '0.9rem' }}>{BRL(totalGlobalSaldo)}</td>
-              </tr>
-            </tbody>
-          </table>
+
+          <div style={{ padding: '1.5rem', overflowX: 'auto' }}>
+            {/* Aba 1: Resumo Acumulado */}
+            {dashAba === 'resumo' && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano:</label>
+                    <select style={{ ...inputStyle, width: '150px' }} value={dashAno} onChange={e => setDashAno(e.target.value)}>
+                      <option value="Todos">Todos os Anos</option>
+                      {anosDisponiveis.map(ano => <option key={ano} value={ano}>{ano}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginLeft: '1rem' }}>
+                    <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Conta Bancária:</label>
+                    <select style={{ ...inputStyle, width: '250px' }} value={dashConta} onChange={e => setDashConta(e.target.value)}>
+                      <option value="Todas">Todas as Contas</option>
+                      {contasDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid var(--border-color)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                      <th style={{ padding: '0.6rem 0.5rem' }}>Departamento</th>
+                      <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center' }}>Transações</th>
+                      <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Receitas</th>
+                      <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Despesas</th>
+                      <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right' }}>Saldo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {depTableData.map((d, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                        <td style={{ padding: '0.65rem 0.5rem', fontWeight: 600 }}>{d.dep}</td>
+                        <td style={{ padding: '0.65rem 0.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>{d.count}</td>
+                        <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--green)' }}>{BRL(d.receitas)}</td>
+                        <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--red)' }}>{BRL(d.despesas)}</td>
+                        <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 700, color: d.saldo >= 0 ? 'var(--green)' : 'var(--red)' }}>{BRL(d.saldo)}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ borderTop: '3px solid var(--primary)', background: '#f9fafb' }}>
+                      <td style={{ padding: '0.8rem 0.5rem', fontWeight: 800, color: 'var(--primary)', fontSize: '0.9rem' }}>TOTAL GERAL</td>
+                      <td style={{ padding: '0.8rem 0.5rem', textAlign: 'center', fontWeight: 700 }}>{depTableData.reduce((s, d) => s + d.count, 0)}</td>
+                      <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: 'var(--green)', fontSize: '0.9rem' }}>{BRL(totalGlobalRec)}</td>
+                      <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: 'var(--red)', fontSize: '0.9rem' }}>{BRL(totalGlobalDesp)}</td>
+                      <td style={{ padding: '0.8rem 0.5rem', textAlign: 'right', fontWeight: 800, color: totalGlobalSaldo >= 0 ? 'var(--green)' : 'var(--red)', fontSize: '0.9rem' }}>{BRL(totalGlobalSaldo)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Aba 2: Visão Anual */}
+            {dashAba === 'anual' && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano Referência:</label>
+                    <select style={{ ...inputStyle, width: '150px' }} value={dashAno} onChange={e => setDashAno(e.target.value)}>
+                      <option value="Todos">Todos os Anos</option>
+                      {anosDisponiveis.map(ano => (
+                        <option key={ano} value={ano}>{ano}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginLeft: '1rem' }}>
+                    <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Conta Bancária:</label>
+                    <select style={{ ...inputStyle, width: '250px' }} value={dashConta} onChange={e => setDashConta(e.target.value)}>
+                      <option value="Todas">Todas as Contas</option>
+                      {contasDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '1.5rem', background: '#fff', padding: '0.6rem 1.25rem', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 600, fontSize: '0.875rem', alignItems: 'center' }}>
+                    <div>Total Receitas: <span style={{ color: 'var(--green)', marginLeft: '0.3rem' }}>{BRL(depAnoData.reduce((s, d) => s + d.receitas, 0))}</span></div>
+                    <div>Total Despesas: <span style={{ color: 'var(--red)', marginLeft: '0.3rem' }}>{BRL(depAnoData.reduce((s, d) => s + d.despesas, 0))}</span></div>
+                    <div style={{ borderLeft: '2px solid var(--border-color)', paddingLeft: '1.5rem' }}>
+                      Saldo do Ano:
+                      <span style={{
+                        color: (depAnoData.reduce((s, d) => s + d.receitas, 0) - depAnoData.reduce((s, d) => s + d.despesas, 0)) >= 0 ? 'var(--green)' : 'var(--red)',
+                        marginLeft: '0.3rem',
+                        fontWeight: 700
+                      }}>
+                        {BRL(depAnoData.reduce((s, d) => s + d.receitas, 0) - depAnoData.reduce((s, d) => s + d.despesas, 0))}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                  {/* Despesas Column */}
+                  <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem' }}>
+                    <h3 style={{ color: 'var(--red)', borderBottom: '2px solid var(--red)', paddingBottom: '0.5rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>↓ Despesas</span>
+                      <span>{BRL(depAnoData.reduce((s, d) => s + d.despesas, 0))}</span>
+                    </h3>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+                      <tbody>
+                        {depAnoData.filter(d => d.despesas > 0).sort((a, b) => b.despesas - a.despesas).map((d, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                            <td style={{ padding: '0.65rem 0.5rem', fontWeight: 600, color: 'var(--text-dark)' }}>{d.dep}</td>
+                            <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--red)' }}>{BRL(d.despesas)}</td>
+                          </tr>
+                        ))}
+                        {depAnoData.filter(d => d.despesas > 0).length === 0 && (
+                          <tr><td colSpan={2} style={{ padding: '1rem', textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma despesa neste ano.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Receitas Column */}
+                  <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem' }}>
+                    <h3 style={{ color: 'var(--green)', borderBottom: '2px solid var(--green)', paddingBottom: '0.5rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>↑ Receitas</span>
+                      <span>{BRL(depAnoData.reduce((s, d) => s + d.receitas, 0))}</span>
+                    </h3>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+                      <tbody>
+                        {depAnoData.filter(d => d.receitas > 0).sort((a, b) => b.receitas - a.receitas).map((d, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                            <td style={{ padding: '0.65rem 0.5rem', fontWeight: 600, color: 'var(--text-dark)' }}>{d.dep}</td>
+                            <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right', fontWeight: 600, color: 'var(--green)' }}>{BRL(d.receitas)}</td>
+                          </tr>
+                        ))}
+                        {depAnoData.filter(d => d.receitas > 0).length === 0 && (
+                          <tr><td colSpan={2} style={{ padding: '1rem', textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma receita neste ano.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Aba 3: Detalhamento por Dep. */}
+            {dashAba === 'detalhado' && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px' }}>
+                  <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Selecione o Departamento:</label>
+                  <select style={{ ...inputStyle, width: '300px' }} value={dashDepSelecionado || ''} onChange={e => setDashDepSelecionado(e.target.value)}>
+                    <option value="">-- Selecione um Departamento --</option>
+                    {depsDisponiveis.map(dep => (
+                      <option key={dep} value={dep}>{dep}</option>
+                    ))}
+                  </select>
+
+                  <span style={{ margin: '0 0.5rem', color: '#ccc' }}>|</span>
+
+                  <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano:</label>
+                  <select style={{ ...inputStyle, width: '120px' }} value={dashAno} onChange={e => setDashAno(e.target.value)}>
+                    <option value="Todos">Todos os Anos</option>
+                    {anosDisponiveis.map(ano => (
+                      <option key={ano} value={ano}>{ano}</option>
+                    ))}
+                  </select>
+
+                  <span style={{ margin: '0 0.5rem', color: '#ccc' }}>|</span>
+
+                  <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Conta:</label>
+                  <select style={{ ...inputStyle, width: '200px' }} value={dashConta} onChange={e => setDashConta(e.target.value)}>
+                    <option value="Todas">Todas as Contas</option>
+                    {contasDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+
+                {dashDepSelecionado ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+                    {/* Resumo Rápido do Departamento */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
+                      <div className="metric-card green">
+                        <div className="metric-title">Receitas do Ano ({dashAno})</div>
+                        <div className="metric-value" style={{ color: 'var(--green)' }}>{BRL(depDetalhamentoRec)}</div>
+                      </div>
+                      <div className="metric-card orange">
+                        <div className="metric-title">Despesas do Ano ({dashAno})</div>
+                        <div className="metric-value" style={{ color: 'var(--red)' }}>{BRL(depDetalhamentoDesp)}</div>
+                      </div>
+                      <div className="metric-card blue">
+                        <div className="metric-title">Saldo no Ano ({dashAno})</div>
+                        <div className="metric-value" style={{ color: depDetalhamentoSaldo >= 0 ? 'var(--green)' : 'var(--red)' }}>{BRL(depDetalhamentoSaldo)}</div>
+                      </div>
+                    </div>
+
+                    {/* Gráfico de Progessão Anual */}
+                    <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem', background: '#fff' }}>
+                      <h3 style={{ fontSize: '1rem', color: 'var(--text-dark)', margin: '0 0 1rem 0' }}>Progressão de Receitas vs Despesas — {dashDepSelecionado} ({dashAno})</h3>
+                      <div style={{ height: 250 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RechartsLineChart data={depChartData} margin={{ top: 10, right: 30, left: 20, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#E5E7EB" />
+                            <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#6B7280' }} axisLine={false} tickLine={false} />
+                            <YAxis tickFormatter={(val) => BRL(val)} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} width={80} />
+                            <Tooltip formatter={(value) => BRL(value)} />
+                            <Legend iconType="circle" />
+                            <Line type="monotone" dataKey="Receitas" stroke="#10B981" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
+                            <Line type="monotone" dataKey="Despesas" stroke="#EF4444" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
+                          </RechartsLineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    {/* Tabela de Lançamentos */}
+                    <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1rem', background: '#fff' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                        <h3 style={{ fontSize: '1rem', color: 'var(--primary)', margin: 0 }}>Lançamentos: {dashDepSelecionado}</h3>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 600, background: 'var(--blue-bg)', color: 'var(--blue)', padding: '0.3rem 0.8rem', borderRadius: '999px' }}>
+                          {transacoesDep.length} registros
+                        </span>
+                      </div>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '2px solid var(--border-color)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                            <th style={{ padding: '0.6rem 0.5rem', width: '90px' }}>Data</th>
+                            <th style={{ padding: '0.6rem 0.5rem' }}>Histórico</th>
+                            <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center', width: '100px' }}>Tipo</th>
+                            <th style={{ padding: '0.6rem 0.5rem', textAlign: 'right', width: '120px' }}>Valor</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {transacoesDep.sort((a, b) => {
+                            const dA = a.data ? a.data.split('/').reverse().join('-') : '';
+                            const dB = b.data ? b.data.split('/').reverse().join('-') : '';
+                            return dB.localeCompare(dA); // desc
+                          }).map((t, idx) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                              <td style={{ padding: '0.6rem 0.5rem', fontWeight: 500, whiteSpace: 'nowrap' }}>{t.data}</td>
+                              <td style={{ padding: '0.6rem 0.5rem', fontWeight: 500, textTransform: 'uppercase' }}>{t.historico}</td>
+                              <td style={{ padding: '0.6rem 0.5rem', textAlign: 'center' }}>
+                                <span style={{
+                                  fontSize: '0.72rem', fontWeight: 700, padding: '0.2rem 0.6rem', borderRadius: '999px',
+                                  background: t.tipo_movimento === 'Receita' ? 'var(--green-bg)' : 'var(--accent-light)',
+                                  color: t.tipo_movimento === 'Receita' ? 'var(--green)' : 'var(--red)'
+                                }}>
+                                  {t.tipo_movimento === 'Receita' ? '↑ Entr.' : '↓ Saída'}
+                                </span>
+                              </td>
+                              <td style={{ padding: '0.6rem 0.5rem', textAlign: 'right', fontWeight: 700, color: t.valor >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                                {BRL(t.valor)}
+                              </td>
+                            </tr>
+                          ))}
+                          {transacoesDep.length === 0 && (
+                            <tr><td colSpan={4} style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)' }}>Nenhum lançamento encontrado neste ano.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                  </div>
+                ) : (
+                  <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)', border: '1px dashed var(--border-color)', borderRadius: '8px' }}>
+                    Selecione um departamento acima para visualizar seus detalhes e lançamentos.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
       </div>
@@ -861,7 +1151,7 @@ function App() {
       } else {
         await axios.post('http://localhost:8000/api/departamentos', novoDepartamento);
       }
-      setNovoDepartamento({ nome: '', tipo: 'misto', ativo: true });
+      setNovoDepartamento(emptyDepartamento);
       setEditandoDepartamento(null);
       await fetchDepartamentos();
     } catch (e) {
@@ -895,7 +1185,8 @@ function App() {
     setNovoDepartamento({
       nome: dep.nome || '',
       tipo: dep.tipo || 'misto',
-      ativo: dep.ativo
+      ativo: dep.ativo,
+      faz_parte_movimento: dep.faz_parte_movimento !== false
     });
   };
 
@@ -906,7 +1197,7 @@ function App() {
           <div className="panel-header" style={{ marginBottom: '1rem' }}>
             <Plus size={16} /> {editandoDepartamento ? 'Editar Departamento' : 'Novo Departamento'}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
             <div>
               <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Nome do Departamento *</label>
               <input style={inputStyle} placeholder="Ex: CONSTRUÇÃO - Mão de obra" value={novoDepartamento.nome}
@@ -921,10 +1212,18 @@ function App() {
                 <option value="misto">Misto (Ambos)</option>
               </select>
             </div>
+            <div>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Faz parte do Movimento? *</label>
+              <select style={inputStyle} value={novoDepartamento.faz_parte_movimento ? 'sim' : 'nao'}
+                onChange={e => setNovoDepartamento(d => ({ ...d, faz_parte_movimento: e.target.value === 'sim' }))}>
+                <option value="sim">✅ Sim — Entra no Dashboard</option>
+                <option value="nao">❌ Não — Não entra no Dashboard</option>
+              </select>
+            </div>
           </div>
           <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
             {editandoDepartamento && (
-              <button onClick={() => { setEditandoDepartamento(null); setNovoDepartamento({ nome: '', tipo: 'misto', ativo: true }); }} style={{
+              <button onClick={() => { setEditandoDepartamento(null); setNovoDepartamento(emptyDepartamento); }} style={{
                 display: 'flex', alignItems: 'center', gap: '0.4rem',
                 padding: '0.5rem 1.25rem', border: '1px solid var(--border-color)',
                 borderRadius: '6px', background: 'var(--white)', color: 'var(--text-muted)',
@@ -961,13 +1260,14 @@ function App() {
                 <th style={{ padding: '0.6rem 0.5rem', width: '40px' }}>ID</th>
                 <th style={{ padding: '0.6rem 0.5rem' }}>Nome do Departamento</th>
                 <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center', width: '120px' }}>Tipo</th>
+                <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center', width: '100px' }}>Movimento</th>
                 <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center', width: '60px' }}>Ativo</th>
                 <th style={{ padding: '0.6rem 0.5rem', textAlign: 'center', width: '100px' }}>Ações</th>
               </tr>
             </thead>
             <tbody>
               {departamentos.length === 0 ? (
-                <tr><td colSpan={5} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>Nenhum departamento cadastrado.</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>Nenhum departamento cadastrado.</td></tr>
               ) : departamentos.map((d, idx) => (
                 <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)', opacity: d.ativo ? 1 : 0.5 }}>
                   <td style={{ padding: '0.6rem 0.5rem', color: 'var(--text-muted)', fontSize: '0.78rem' }}>{d.id_codigo}</td>
@@ -979,6 +1279,15 @@ function App() {
                       color: d.tipo === 'credito' ? 'var(--green)' : d.tipo === 'debito' ? 'var(--red)' : 'var(--blue)'
                     }}>
                       {d.tipo === 'credito' ? 'Crédito' : d.tipo === 'debito' ? 'Débito' : 'Misto'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '0.6rem 0.5rem', textAlign: 'center' }}>
+                    <span style={{
+                      fontSize: '0.75rem', fontWeight: 700, padding: '0.2rem 0.6rem', borderRadius: '999px',
+                      background: d.faz_parte_movimento !== false ? 'var(--green-bg)' : '#fef3c7',
+                      color: d.faz_parte_movimento !== false ? 'var(--green)' : '#b45309'
+                    }}>
+                      {d.faz_parte_movimento !== false ? '✅ Sim' : '❌ Não'}
                     </span>
                   </td>
                   <td style={{ padding: '0.6rem 0.5rem', textAlign: 'center', cursor: 'pointer' }} onClick={() => handleToggleDepartamento(d)}>
@@ -1055,6 +1364,29 @@ function App() {
     } catch (e) {
       console.error('Erro ao executar regras', e);
       alert('Erro ao executar as regras. Verifique o console.');
+    } finally {
+      setSalvandoRegra(false);
+    }
+  };
+
+  const handleExecutarTodasAsRegras = async () => {
+    const regrasAtivasIds = regras.filter(r => r.ativo).map(r => r.id_codigo);
+    if (regrasAtivasIds.length === 0) {
+      alert("Não existem regras ativas para executar.");
+      return;
+    }
+    if (!confirm(`Deseja aplicar TODAS as ${regrasAtivasIds.length} regras ativas aos lançamentos pendentes?`)) return;
+    setSalvandoRegra(true);
+    try {
+      const res = await axios.post(`http://localhost:8000/api/regras/executar-multiplas`, {
+        regra_ids: regrasAtivasIds
+      });
+      alert(`${res.data.updated} lançamentos conciliados com sucesso por todas as regras!`);
+      await fetchLancamentosSemDep();
+      await fetchData();
+    } catch (e) {
+      console.error('Erro ao executar todas as regras', e);
+      alert('Erro ao executar todas as regras. Verifique o console.');
     } finally {
       setSalvandoRegra(false);
     }
@@ -1318,9 +1650,12 @@ function App() {
             </div>
 
             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <button onClick={handleExecutarTodasAsRegras} disabled={salvandoRegra} style={{ background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem 1rem', cursor: salvandoRegra ? 'not-allowed' : 'pointer', fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem', opacity: salvandoRegra ? 0.7 : 1 }}>
+                <CheckSquare size={14} /> Rodar Todas as Regras
+              </button>
               {regrasSelecionadas.length > 0 && (
-                <button onClick={handleExecutarRegrasSelecionadas} style={{ background: 'var(--green)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem 1rem', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                  ▶ Executar em Lote
+                <button onClick={handleExecutarRegrasSelecionadas} disabled={salvandoRegra} style={{ background: 'var(--green)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem 1rem', cursor: salvandoRegra ? 'not-allowed' : 'pointer', fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem', opacity: salvandoRegra ? 0.7 : 1 }}>
+                  ▶ Executar {regrasSelecionadas.length} em Lote
                 </button>
               )}
             </div>
@@ -1628,6 +1963,434 @@ function App() {
 
   };
 
+  // ─── CONCILIAÇÃO — MANUTENÇÃO DE LANÇAMENTOS ─────────────────
+  const fetchConciliacao = async (pageOverride) => {
+    setConcLoading(true);
+    try {
+      const p = pageOverride || concPage;
+      const params = new URLSearchParams();
+      if (concFiltros.historico) params.append('historico', concFiltros.historico);
+      if (concFiltros.detalhes) params.append('detalhes', concFiltros.detalhes);
+      if (concFiltros.tipo) params.append('tipo', concFiltros.tipo);
+      if (concFiltros.departamento) params.append('departamento', concFiltros.departamento);
+      if (concFiltros.status) params.append('status', concFiltros.status);
+      if (concFiltros.data_de) params.append('data_de', concFiltros.data_de);
+      if (concFiltros.data_ate) params.append('data_ate', concFiltros.data_ate);
+      params.append('page', p);
+      params.append('per_page', concPerPage);
+      const resp = await axios.get(`http://localhost:8000/api/conciliacao/lancamentos?${params.toString()}`);
+      setConcData(resp.data);
+    } catch (e) {
+      console.error('Erro ao buscar conciliação', e);
+    } finally {
+      setConcLoading(false);
+    }
+  };
+
+  const handleConcPesquisar = () => {
+    setConcPage(1);
+    setConcSelecionados([]);
+    fetchConciliacao(1);
+  };
+
+  const handleConcLimpar = () => {
+    setConcFiltros(emptyConcFiltros);
+    setConcPage(1);
+    setConcSelecionados([]);
+    setConcData({ lancamentos: [], total: 0, page: 1, per_page: 50, total_pages: 0 });
+  };
+
+  const handleConcPageChange = (newPage) => {
+    setConcPage(newPage);
+    setConcSelecionados([]);
+    fetchConciliacao(newPage);
+  };
+
+  const handleConcStartEdit = (lanc) => {
+    setConcEditingId(lanc.id_codigo);
+    setConcEditDep(lanc.id_departamento || '');
+    setConcEditStatus(lanc.status || 'pendente');
+  };
+
+  const handleConcCancelEdit = () => {
+    setConcEditingId(null);
+    setConcEditDep('');
+    setConcEditStatus('');
+  };
+
+  const handleConcSaveEdit = async (id_codigo) => {
+    setConcSaving(true);
+    try {
+      const payload = {
+        id_departamento: concEditDep ? parseInt(concEditDep) : null,
+        status: concEditStatus
+      };
+      await axios.put(`http://localhost:8000/api/lancamentos/${id_codigo}`, payload);
+      setConcEditingId(null);
+      await fetchConciliacao();
+      await fetchData();
+    } catch (e) {
+      console.error('Erro ao salvar lançamento', e);
+      alert('Erro ao salvar as alterações.');
+    } finally {
+      setConcSaving(false);
+    }
+  };
+
+  const handleConcBulkSubmit = async () => {
+    if (concSelecionados.length === 0) return;
+    if (!concBulkDep) {
+      alert("Selecione um departamento destino para atualizar os lançamentos selecionados.");
+      return;
+    }
+    setConcSaving(true);
+    try {
+      await axios.post('http://localhost:8000/api/lancamentos/bulk-departamento', {
+        lancamento_ids: concSelecionados,
+        departamento_id: parseInt(concBulkDep)
+      });
+      setConcSelecionados([]);
+      setConcBulkDep('');
+      await fetchConciliacao();
+      await fetchData();
+    } catch (e) {
+      console.error('Erro no update em massa', e);
+      alert('Erro ao atualizar lançamentos em lote.');
+    } finally {
+      setConcSaving(false);
+    }
+  };
+
+  const renderConciliacao = () => {
+    const { lancamentos, total, page, total_pages } = concData;
+
+    const totalRec = lancamentos.filter(t => t.tipo_movimento === 'Receita').reduce((s, t) => s + t.valor_absoluto, 0);
+    const totalDesp = lancamentos.filter(t => t.tipo_movimento === 'Despesa').reduce((s, t) => s + t.valor_absoluto, 0);
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+        {/* Painel de Filtros */}
+        <div className="panel">
+          <div className="panel-header" style={{ marginBottom: '1rem' }}>
+            <Search size={16} /> Pesquisa de Lançamentos — Conciliação
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
+            <div style={{ gridColumn: 'span 2' }}>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Histórico contém</label>
+              <input style={inputStyle} placeholder="Ex: PIX, TED, boleto..." value={concFiltros.historico}
+                onChange={e => setConcFiltros(f => ({ ...f, historico: e.target.value.toUpperCase() }))} />
+            </div>
+            <div style={{ gridColumn: 'span 2' }}>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Detalhes contém</label>
+              <input style={inputStyle} placeholder="Ex: CPF, CNPJ, nome..." value={concFiltros.detalhes}
+                onChange={e => setConcFiltros(f => ({ ...f, detalhes: e.target.value.toUpperCase() }))} />
+            </div>
+            <div>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Tipo</label>
+              <select style={inputStyle} value={concFiltros.tipo}
+                onChange={e => setConcFiltros(f => ({ ...f, tipo: e.target.value }))}>
+                <option value="">Todos</option>
+                <option value="Receita">Receita</option>
+                <option value="Despesa">Despesa</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Departamento</label>
+              <select style={inputStyle} value={concFiltros.departamento}
+                onChange={e => setConcFiltros(f => ({ ...f, departamento: e.target.value }))}>
+                <option value="">Todos</option>
+                <option value="__null__">⚠ Sem Departamento</option>
+                {departamentos.map(d => (
+                  <option key={d.id_codigo} value={d.nome}>{d.nome}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Status</label>
+              <select style={inputStyle} value={concFiltros.status}
+                onChange={e => setConcFiltros(f => ({ ...f, status: e.target.value }))}>
+                <option value="">Todos</option>
+                <option value="pendente">Pendente</option>
+                <option value="conciliado">Conciliado</option>
+                <option value="finalizado">Finalizado</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '0.35rem' }}>Data De</label>
+              <input type="date" style={inputStyle} value={concFiltros.data_de}
+                onChange={e => setConcFiltros(f => ({ ...f, data_de: e.target.value }))} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+            <button onClick={handleConcLimpar} style={{
+              display: 'flex', alignItems: 'center', gap: '0.4rem',
+              padding: '0.5rem 1.25rem', border: '1px solid var(--border-color)',
+              borderRadius: '6px', background: 'var(--white)', color: 'var(--text-muted)',
+              cursor: 'pointer', fontWeight: 600, fontSize: '0.875rem'
+            }}>
+              <X size={14} /> Limpar
+            </button>
+            <button onClick={handleConcPesquisar} disabled={concLoading} style={{
+              display: 'flex', alignItems: 'center', gap: '0.4rem',
+              padding: '0.5rem 1.5rem', border: 'none',
+              borderRadius: '6px', background: 'var(--primary)', color: 'white',
+              cursor: concLoading ? 'wait' : 'pointer', fontWeight: 600, fontSize: '0.875rem'
+            }}>
+              <Search size={14} /> {concLoading ? 'Buscando...' : 'Pesquisar'}
+            </button>
+          </div>
+        </div>
+
+        {/* Resultado */}
+        {concData.total > 0 && (
+          <>
+            {/* Cards resumo */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
+              <div className="metric-card blue" style={{ padding: '0.8rem 1rem' }}>
+                <div className="metric-title" style={{ fontSize: '0.75rem' }}>Total Encontrados</div>
+                <div className="metric-value" style={{ fontSize: '1.2rem' }}>{total}</div>
+              </div>
+              <div className="metric-card green" style={{ padding: '0.8rem 1rem' }}>
+                <div className="metric-title" style={{ fontSize: '0.75rem' }}>Receitas (página)</div>
+                <div className="metric-value" style={{ fontSize: '1rem', color: 'var(--green)' }}>{BRL(totalRec)}</div>
+              </div>
+              <div className="metric-card orange" style={{ padding: '0.8rem 1rem' }}>
+                <div className="metric-title" style={{ fontSize: '0.75rem' }}>Despesas (página)</div>
+                <div className="metric-value" style={{ fontSize: '1rem', color: 'var(--red)' }}>{BRL(totalDesp)}</div>
+              </div>
+              <div className="metric-card blue2" style={{ padding: '0.8rem 1rem' }}>
+                <div className="metric-title" style={{ fontSize: '0.75rem' }}>Página</div>
+                <div className="metric-value" style={{ fontSize: '1rem' }}>{page} / {total_pages}</div>
+              </div>
+            </div>
+
+            {/* Tabela */}
+            <div className="panel" style={{ overflowX: 'auto' }}>
+              <div className="panel-header panel-header-green" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <CheckSquare size={16} /> Lançamentos para Manutenção
+                  <span style={{ background: 'var(--green-bg)', color: 'var(--green)', borderRadius: '999px', padding: '0.1rem 0.6rem', fontSize: '0.75rem', fontWeight: 700 }}>
+                    {total}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <select style={{ ...inputStyle, width: 'auto', padding: '0.3rem 0.5rem', fontSize: '0.78rem' }} value={concPerPage} onChange={e => {
+                    setConcPerPage(Number(e.target.value));
+                    setConcPage(1);
+                    setConcSelecionados([]);
+                    setTimeout(() => fetchConciliacao(1), 100);
+                  }}>
+                    <option value={30}>30/pág</option>
+                    <option value={50}>50/pág</option>
+                    <option value={100}>100/pág</option>
+                  </select>
+                  <button onClick={() => fetchConciliacao()} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'var(--white)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', padding: '0.3rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600 }}>
+                    <RefreshCw size={12} /> Atualizar
+                  </button>
+                </div>
+              </div>
+
+              {/* Barra de Ação em Massa */}
+              {concSelecionados.length > 0 && (
+                <div style={{ padding: '0.8rem 1rem', background: '#eff6ff', borderBottom: '1px solid #bfdbfe', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ fontWeight: 600, color: 'var(--blue)', fontSize: '0.85rem' }}>
+                    ✅ {concSelecionados.length} lançamento(s) selecionado(s) para aplicação em lote
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <select style={{ ...inputStyle, padding: '0.4rem 0.6rem', fontSize: '0.8rem', minWidth: '250px' }} value={concBulkDep} onChange={e => setConcBulkDep(e.target.value)}>
+                      <option value="">Selecione o Departamento Destino...</option>
+                      {departamentos.map(d => (
+                        <option key={d.id_codigo} value={d.id_codigo}>{d.nome}</option>
+                      ))}
+                    </select>
+                    <button onClick={handleConcBulkSubmit} disabled={!concBulkDep || concSaving} style={{ background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem 1rem', cursor: (!concBulkDep || concSaving) ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '0.8rem', opacity: (!concBulkDep || concSaving) ? 0.5 : 1 }}>
+                      {concSaving ? 'Aplicando...' : 'Aplicar a Todos'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '0.75rem', fontSize: '0.82rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--border-color)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                    <th style={{ padding: '0.6rem 0.4rem', width: '30px', textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        title="Selecionar todos da página"
+                        checked={lancamentos.length > 0 && concSelecionados.length === lancamentos.length}
+                        onChange={(e) => {
+                          if (e.target.checked) setConcSelecionados(lancamentos.map(l => l.id_codigo));
+                          else setConcSelecionados([]);
+                        }}
+                      />
+                    </th>
+                    <th style={{ padding: '0.6rem 0.4rem', width: '40px' }}>#</th>
+                    <th style={{ padding: '0.6rem 0.4rem', width: '85px' }}>Data</th>
+                    <th style={{ padding: '0.6rem 0.4rem' }}>Histórico</th>
+                    <th style={{ padding: '0.6rem 0.4rem' }}>Detalhes</th>
+                    <th style={{ padding: '0.6rem 0.4rem', width: '200px' }}>Departamento</th>
+                    <th style={{ padding: '0.6rem 0.4rem', textAlign: 'center', width: '75px' }}>Tipo</th>
+                    <th style={{ padding: '0.6rem 0.4rem', textAlign: 'right', width: '110px' }}>Valor</th>
+                    <th style={{ padding: '0.6rem 0.4rem', textAlign: 'center', width: '100px' }}>Status</th>
+                    <th style={{ padding: '0.6rem 0.4rem', textAlign: 'center', width: '80px' }}>Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lancamentos.length === 0 ? (
+                    <tr><td colSpan={10} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>Nenhum lançamento encontrado.</td></tr>
+                  ) : lancamentos.map((l) => {
+                    const isEditing = concEditingId === l.id_codigo;
+                    const isSelected = concSelecionados.includes(l.id_codigo);
+                    return (
+                      <tr key={l.id_codigo} onClick={() => {
+                        if (!isEditing) {
+                          if (isSelected) setConcSelecionados(concSelecionados.filter(id => id !== l.id_codigo));
+                          else setConcSelecionados([...concSelecionados, l.id_codigo]);
+                        }
+                      }} style={{ borderBottom: '1px solid var(--border-color)', background: isEditing ? '#eff6ff' : isSelected ? '#f0fdf4' : 'transparent', transition: 'background 0.2s', cursor: isEditing ? 'default' : 'pointer' }}>
+                        <td style={{ padding: '0.55rem 0.4rem', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              if (e.target.checked) setConcSelecionados([...concSelecionados, l.id_codigo]);
+                              else setConcSelecionados(concSelecionados.filter(id => id !== l.id_codigo));
+                            }}
+                          />
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', color: 'var(--text-muted)', fontSize: '0.72rem' }}>{l.id_codigo}</td>
+                        <td style={{ padding: '0.55rem 0.4rem', fontWeight: 500, whiteSpace: 'nowrap', fontSize: '0.78rem' }}>{l.data}</td>
+                        <td style={{ padding: '0.55rem 0.4rem', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.78rem', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.historico}>
+                          {l.historico}
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400, marginTop: '1px' }}>{l.arquivo}</div>
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', fontSize: '0.72rem', color: 'var(--text-muted)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.detalhes || ''}>
+                          {l.detalhes || '—'}
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem' }}>
+                          {isEditing ? (
+                            <select style={{ ...inputStyle, fontSize: '0.8rem', padding: '0.4rem 0.5rem', background: '#fff', width: '100%', borderColor: 'var(--primary)', borderWidth: '2px' }} value={concEditDep}
+                              onChange={e => setConcEditDep(e.target.value)}>
+                              <option value="">Sem Departamento</option>
+                              {departamentos.map(d => (
+                                <option key={d.id_codigo} value={d.id_codigo}>{d.nome}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span style={{ fontWeight: 600, color: l.departamento_destino ? 'var(--primary)' : 'var(--red)', fontSize: '0.78rem' }}>
+                              {l.departamento_destino || '⚠ Sem Depto'}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', textAlign: 'center' }}>
+                          <span style={{
+                            fontSize: '0.7rem', fontWeight: 700, padding: '0.15rem 0.5rem', borderRadius: '999px',
+                            background: l.tipo_movimento === 'Receita' ? 'var(--green-bg)' : 'var(--accent-light)',
+                            color: l.tipo_movimento === 'Receita' ? 'var(--green)' : 'var(--red)'
+                          }}>
+                            {l.tipo_movimento === 'Receita' ? '↑ Entr.' : '↓ Saída'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', textAlign: 'right', fontWeight: 700, color: l.valor >= 0 ? 'var(--green)' : 'var(--red)', fontSize: '0.82rem' }}>
+                          {BRL(l.valor)}
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', textAlign: 'center' }}>
+                          {isEditing ? (
+                            <select style={{ ...inputStyle, fontSize: '0.72rem', padding: '0.25rem 0.3rem', background: '#fff' }} value={concEditStatus}
+                              onChange={e => setConcEditStatus(e.target.value)}>
+                              <option value="pendente">Pendente</option>
+                              <option value="conciliado">Conciliado</option>
+                              <option value="finalizado">Finalizado</option>
+                            </select>
+                          ) : (
+                            <span style={{
+                              fontSize: '0.7rem', fontWeight: 600, padding: '0.15rem 0.5rem', borderRadius: '999px',
+                              background: l.status === 'finalizado' ? 'var(--green-bg)' : l.status === 'conciliado' ? 'var(--blue-bg)' : '#fef3c7',
+                              color: l.status === 'finalizado' ? 'var(--green)' : l.status === 'conciliado' ? 'var(--blue)' : '#b45309'
+                            }}>
+                              {l.status === 'finalizado' ? 'Finalizado' : l.status === 'conciliado' ? 'Conciliado' : 'Pendente'}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: '0.55rem 0.4rem', textAlign: 'center' }}>
+                          {isEditing ? (
+                            <div style={{ display: 'flex', gap: '0.3rem', justifyContent: 'center' }}>
+                              <button onClick={() => handleConcSaveEdit(l.id_codigo)} disabled={concSaving}
+                                style={{ background: 'var(--green)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                                <Save size={11} /> Salvar
+                              </button>
+                              <button onClick={handleConcCancelEdit}
+                                style={{ background: '#f3f4f6', color: 'var(--text-muted)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.25rem 0.4rem', cursor: 'pointer', fontSize: '0.7rem' }}>
+                                <X size={11} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button onClick={() => handleConcStartEdit(l)}
+                              style={{ background: 'var(--blue-bg)', color: 'var(--blue)', border: 'none', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.2rem', margin: '0 auto' }}>
+                              <Edit2 size={11} /> Editar
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {/* Paginação */}
+              {total_pages > 1 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', padding: '0.75rem 0', borderTop: '1px solid var(--border-color)' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    Mostrando {((page - 1) * concPerPage) + 1} até {Math.min(page * concPerPage, total)} de <strong>{total}</strong> lançamentos
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                    <button
+                      onClick={() => handleConcPageChange(1)}
+                      disabled={page <= 1}
+                      style={{ padding: '0.35rem 0.6rem', background: page <= 1 ? '#e5e7eb' : 'var(--white)', color: page <= 1 ? '#9ca3af' : 'var(--text-dark)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: page <= 1 ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+                      Primeira
+                    </button>
+                    <button
+                      onClick={() => handleConcPageChange(page - 1)}
+                      disabled={page <= 1}
+                      style={{ padding: '0.35rem 0.5rem', background: page <= 1 ? '#e5e7eb' : 'var(--white)', color: page <= 1 ? '#9ca3af' : 'var(--text-dark)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: page <= 1 ? 'not-allowed' : 'pointer', fontSize: '0.78rem' }}>
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span style={{ padding: '0 0.75rem', fontSize: '0.82rem', fontWeight: 700, color: 'var(--primary)' }}>Pág {page} de {total_pages}</span>
+                    <button
+                      onClick={() => handleConcPageChange(page + 1)}
+                      disabled={page >= total_pages}
+                      style={{ padding: '0.35rem 0.5rem', background: page >= total_pages ? '#e5e7eb' : 'var(--white)', color: page >= total_pages ? '#9ca3af' : 'var(--text-dark)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: page >= total_pages ? 'not-allowed' : 'pointer', fontSize: '0.78rem' }}>
+                      <ChevronRight size={14} />
+                    </button>
+                    <button
+                      onClick={() => handleConcPageChange(total_pages)}
+                      disabled={page >= total_pages}
+                      style={{ padding: '0.35rem 0.6rem', background: page >= total_pages ? '#e5e7eb' : 'var(--white)', color: page >= total_pages ? '#9ca3af' : 'var(--text-dark)', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: page >= total_pages ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+                      Última
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Estado vazio: antes de pesquisar */}
+        {concData.total === 0 && !concLoading && (
+          <div className="panel" style={{ textAlign: 'center', padding: '3rem 2rem' }}>
+            <CheckSquare size={40} style={{ color: 'var(--primary)', marginBottom: '1rem', opacity: 0.5 }} />
+            <h3 style={{ color: 'var(--text-dark)', margin: '0 0 0.5rem 0' }}>Pesquise os Lançamentos</h3>
+            <p style={{ color: 'var(--text-muted)', maxWidth: '500px', margin: '0 auto', fontSize: '0.9rem' }}>
+              Use os filtros acima e clique em <strong>Pesquisar</strong> para listar os lançamentos.
+              Você poderá editar o departamento e o status de cada lançamento diretamente na tabela.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  };
 
 
   // ─── LAYOUT PRINCIPAL ──────────────────────────────────────────
@@ -1637,6 +2400,8 @@ function App() {
       {searching && <LoadingOverlay title="Pesquisando..." subtitle="Filtrando os arquivos conforme os critérios informados." />}
       {salvandoDepartamento && <LoadingOverlay title="Salvando Departamento..." subtitle="Aguarde enquanto registramos o departamento no banco." />}
       {salvandoRegra && <LoadingOverlay title="Salvando Regra..." subtitle="Aguarde enquanto registramos a regra no banco." />}
+      {concLoading && <LoadingOverlay title="Pesquisando Lançamentos..." subtitle="Aguarde, processando filtros de conciliação." />}
+      {concSaving && <LoadingOverlay title="Salvando Alteração..." subtitle="Aguarde, atualizando o departamento do lançamento." />}
       <div className="app-container">
         <aside className="sidebar">
           <div className="logo-container">
@@ -1678,7 +2443,7 @@ function App() {
           {currentMenu === 'Lançamentos' && renderLancamentos()}
           {currentMenu === 'Regras do Extrato' && renderRegras()}
           {currentMenu === 'Departamento' && renderDepartamentos()}
-          {currentMenu === 'Conciliação' && renderRegras()}
+          {currentMenu === 'Conciliação' && renderConciliacao()}
           {!['Dashboard', 'Arquivos', 'Lançamentos', 'Regras do Extrato', 'Departamento', 'Conciliação'].includes(currentMenu) && (
             <div className="panel">
               <div className="panel-header panel-header-orange">Em construção</div>
