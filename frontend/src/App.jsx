@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import {
-  LineChart as LucideLineChart, Wallet, Users, MapPin, Pizza, BarChart, Settings, Check, Folder, Search, X, CheckSquare, BookOpen, Plus, Trash2, ToggleLeft, ToggleRight, Edit2, ChevronLeft, ChevronRight, Save, RefreshCw
+  Upload, FileText, CheckCircle, Clock, AlertCircle, Trash2, Search, X, Folder, Calendar, PieChart as PieChartIcon, Wallet, Users, MapPin, Pizza, BarChart, Settings, Check, CheckSquare, BookOpen, Plus, ToggleLeft, ToggleRight, Edit2, ChevronLeft, ChevronRight, Save, RefreshCw, LineChart as LucideLineChart
 } from 'lucide-react';
-import { BarChart as RechartsBarChart, Bar, LineChart as RechartsLineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
+import { LineChart, Line, BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 import './index.css';
 
 // ─── OVERLAY DE CARREGAMENTO ──────────────────────────────
@@ -99,6 +101,7 @@ function App() {
   const [dashAno, setDashAno] = useState('Todos'); // default
   const [dashConta, setDashConta] = useState('Todas');
   const [dashDepSelecionado, setDashDepSelecionado] = useState(null);
+  const [isPrintingDash, setIsPrintingDash] = useState(false);
 
   useEffect(() => { fetchData(); }, []);
 
@@ -358,41 +361,149 @@ function App() {
     const totalGlobalDesp = depTableData.reduce((s, d) => s + d.despesas, 0);
     const totalGlobalSaldo = totalGlobalRec - totalGlobalDesp;
 
+    const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#6366F1', '#14B8A6'];
+
+    const pieReceitas = depTableData.filter(d => d.receitas > 0).map(d => {
+      const perc = totalGlobalRec ? parseFloat(((d.receitas / totalGlobalRec) * 100).toFixed(1)) : 0;
+      return { name: `${d.dep} (${perc}%)`, value: d.receitas, perc };
+    }).sort((a, b) => b.value - a.value);
+
+    const pieDespesas = depTableData.filter(d => d.despesas > 0).map(d => {
+      const perc = totalGlobalDesp ? parseFloat(((d.despesas / totalGlobalDesp) * 100).toFixed(1)) : 0;
+      return { name: `${d.dep} (${perc}%)`, value: d.despesas, perc };
+    }).sort((a, b) => b.value - a.value);
+
+    const handleDownloadPDF = async () => {
+      setIsPrintingDash(true);
+      setTimeout(async () => {
+        try {
+          // Utilizando formato paisagem 'l' (landscape)
+          const pdf = new jsPDF('l', 'mm', 'a4');
+          const pdfWidth = pdf.internal.pageSize.getWidth();
+          const title = "Fluxo Caixa ano 24, 25 e 26";
+
+          const pages = ['page1', 'page2', 'page3', 'page4'];
+          let addedPage = false;
+
+          for (const pageName of pages) {
+            if (addedPage) pdf.addPage();
+
+            // Adicionando Título
+            pdf.setFontSize(22);
+            pdf.setTextColor(17, 24, 39);
+            pdf.text(title, pdfWidth / 2, 15, { align: 'center' });
+            let currentY = 25;
+
+            if (pageName === 'page1') {
+              // Renderizando Cards e Resumo Acumulado
+              const elCards = document.getElementById('dash-cards');
+              const canvasCards = await html2canvas(elCards, { scale: 2, useCORS: true });
+              const imgCards = canvasCards.toDataURL('image/png');
+              const hCards = (pdf.getImageProperties(imgCards).height * pdfWidth) / pdf.getImageProperties(imgCards).width;
+              pdf.addImage(imgCards, 'PNG', 0, currentY, pdfWidth, hCards);
+              currentY += hCards + 5;
+
+              const elResumo = document.getElementById('dash-resumo');
+              if (elResumo) {
+                const canvasResumo = await html2canvas(elResumo, { scale: 2, useCORS: true });
+                const imgResumo = canvasResumo.toDataURL('image/png');
+                const hResumo = (pdf.getImageProperties(imgResumo).height * pdfWidth) / pdf.getImageProperties(imgResumo).width;
+                pdf.addImage(imgResumo, 'PNG', 0, currentY, pdfWidth, hResumo);
+              }
+            } else if (pageName === 'page2') {
+              const elVisao = document.getElementById('dash-visao');
+              if (elVisao) {
+                const canvasVisao = await html2canvas(elVisao, { scale: 2, useCORS: true });
+                const imgVisao = canvasVisao.toDataURL('image/png');
+                const hVisao = (pdf.getImageProperties(imgVisao).height * pdfWidth) / pdf.getImageProperties(imgVisao).width;
+                pdf.addImage(imgVisao, 'PNG', 0, currentY, pdfWidth, hVisao);
+              }
+            } else if (pageName === 'page3') {
+              const elPizza = document.getElementById('dash-pizza');
+              if (elPizza) {
+                const canvasPizza = await html2canvas(elPizza, { scale: 2, useCORS: true });
+                const imgPizza = canvasPizza.toDataURL('image/png');
+                const hPizza = (pdf.getImageProperties(imgPizza).height * pdfWidth) / pdf.getImageProperties(imgPizza).width;
+                pdf.addImage(imgPizza, 'PNG', 0, currentY, pdfWidth, hPizza);
+              }
+            } else if (pageName === 'page4') {
+              const elTorre = document.getElementById('dash-torre');
+              if (elTorre) {
+                const canvasTorre = await html2canvas(elTorre, { scale: 2, useCORS: true });
+                const imgTorre = canvasTorre.toDataURL('image/png');
+                const hTorre = (pdf.getImageProperties(imgTorre).height * pdfWidth) / pdf.getImageProperties(imgTorre).width;
+                pdf.addImage(imgTorre, 'PNG', 0, currentY, pdfWidth, hTorre);
+              }
+            }
+            addedPage = true;
+          }
+          pdf.save('dashboard-4-paginas.pdf');
+        } catch (err) {
+          console.error("Erro ao gerar PDF", err);
+        } finally {
+          setIsPrintingDash(false);
+        }
+      }, 800);
+    };
+
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
-          <div className="metric-card blue">
-            <div className="metric-title">Saldo Geral</div>
-            <div className="metric-value">{BRL(totalGlobalSaldo)}</div>
-          </div>
-          <div className="metric-card green">
-            <div className="metric-title">Total Receitas</div>
-            <div className="metric-value" style={{ color: 'var(--green)' }}>{BRL(totalGlobalRec)}</div>
-          </div>
-          <div className="metric-card orange">
-            <div className="metric-title">Total Despesas</div>
-            <div className="metric-value" style={{ color: 'var(--red)' }}>{BRL(-totalGlobalDesp)}</div>
-          </div>
-          <div className="metric-card blue2">
-            <div className="metric-title">Transações</div>
-            <div className="metric-value" style={{ fontSize: '1.6rem' }}>{transacoesMovimento.length}</div>
-          </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '-0.5rem' }}>
+          <button onClick={handleDownloadPDF} style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem',
+            padding: '0.6rem 1.25rem', border: 'none', borderRadius: '6px',
+            background: 'var(--primary)', color: 'white', cursor: 'pointer',
+            fontWeight: 700, fontSize: '0.875rem'
+          }}>
+            📥 Gerar PDF do Dashboard Completo
+          </button>
         </div>
 
+        <div id="dash-cards" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', background: isPrintingDash ? '#fff' : 'transparent', padding: isPrintingDash ? '10px' : '0' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
+            <div className="metric-card blue">
+              <div className="metric-title">Saldo Geral</div>
+              <div className="metric-value">{BRL(totalGlobalSaldo)}</div>
+            </div>
+            <div className="metric-card green">
+              <div className="metric-title">Total Receitas</div>
+              <div className="metric-value" style={{ color: 'var(--green)' }}>{BRL(totalGlobalRec)}</div>
+            </div>
+            <div className="metric-card orange">
+              <div className="metric-title">Total Despesas</div>
+              <div className="metric-value" style={{ color: 'var(--red)' }}>{BRL(-totalGlobalDesp)}</div>
+            </div>
+            <div className="metric-card blue2">
+              <div className="metric-title">Transações</div>
+              <div className="metric-value" style={{ fontSize: '1.6rem' }}>{transacoesMovimento.length}</div>
+            </div>
+          </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+            <div className="metric-card green" style={{ background: '#f0fdf4', border: '1px solid var(--green)' }}>
+              <div className="metric-title">Investimentos Aplicados I</div>
+              <div className="metric-value" style={{ fontSize: '1.4rem', color: 'var(--green)' }}>{BRL(91297.14)}</div>
+            </div>
+            <div className="metric-card green" style={{ background: '#f0fdf4', border: '1px solid var(--green)' }}>
+              <div className="metric-title">Investimentos Aplicados II</div>
+              <div className="metric-value" style={{ fontSize: '1.4rem', color: 'var(--green)' }}>{BRL(72323.23)}</div>
+            </div>
+          </div>
+        </div>
 
         {/* Painel com Abas de Resumo */}
         <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: '#f9fafb' }}>
             <div style={dashTabStyles('resumo')} onClick={() => setDashAba('resumo')}>Resumo Acumulado</div>
             <div style={dashTabStyles('anual')} onClick={() => setDashAba('anual')}>Visão Anual</div>
+            <div style={dashTabStyles('graficos-pizza')} onClick={() => setDashAba('graficos-pizza')}>Gráficos Extras</div>
             <div style={dashTabStyles('detalhado')} onClick={() => setDashAba('detalhado')}>Detalhamento por Dep.</div>
           </div>
 
           <div style={{ padding: '1.5rem', overflowX: 'auto' }}>
             {/* Aba 1: Resumo Acumulado */}
-            {dashAba === 'resumo' && (
-              <div>
+            {(dashAba === 'resumo' || isPrintingDash) && (
+              <div id="dash-resumo" style={{ background: isPrintingDash ? '#fff' : 'transparent', padding: isPrintingDash ? '10px' : '0' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px', flexWrap: 'wrap' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                     <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano:</label>
@@ -442,8 +553,8 @@ function App() {
             )}
 
             {/* Aba 2: Visão Anual */}
-            {dashAba === 'anual' && (
-              <div>
+            {(dashAba === 'anual' || isPrintingDash) && (
+              <div id="dash-visao" style={{ background: isPrintingDash ? '#fff' : 'transparent', marginTop: isPrintingDash ? '20px' : '0', padding: isPrintingDash ? '10px' : '0' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px', flexWrap: 'wrap', gap: '1rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                     <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano Referência:</label>
@@ -526,8 +637,8 @@ function App() {
             )}
 
             {/* Aba 3: Detalhamento por Dep. */}
-            {dashAba === 'detalhado' && (
-              <div>
+            {(dashAba === 'detalhado' || isPrintingDash) && (
+              <div id="dash-part3" style={{ background: isPrintingDash ? '#fff' : 'transparent', marginTop: isPrintingDash ? '20px' : '0' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px' }}>
                   <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Selecione o Departamento:</label>
                   <select style={{ ...inputStyle, width: '300px' }} value={dashDepSelecionado || ''} onChange={e => setDashDepSelecionado(e.target.value)}>
@@ -648,6 +759,115 @@ function App() {
                 )}
               </div>
             )}
+
+            {/* Aba: Gráficos Extras (Pizzas e Torres) */}
+            {(dashAba === 'graficos-pizza' || isPrintingDash) && (
+              <div style={{ background: isPrintingDash ? '#fff' : 'transparent', marginTop: isPrintingDash ? '20px' : '0', padding: isPrintingDash ? '10px' : '0' }}>
+                {!isPrintingDash && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', background: '#f3f4f6', padding: '1rem', borderRadius: '8px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Ano:</label>
+                      <select style={{ ...inputStyle, width: '150px' }} value={dashAno} onChange={e => setDashAno(e.target.value)}>
+                        <option value="Todos">Todos os Anos</option>
+                        {anosDisponiveis.map(ano => <option key={ano} value={ano}>{ano}</option>)}
+                      </select>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginLeft: '1rem' }}>
+                      <label style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-dark)' }}>Conta Bancária:</label>
+                      <select style={{ ...inputStyle, width: '250px' }} value={dashConta} onChange={e => setDashConta(e.target.value)}>
+                        <option value="Todas">Todas as Contas</option>
+                        {contasDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {/* Bloco 1: Pizzas (Será a Terceira Página no PDF) */}
+                <div id="dash-pizza" style={{ background: isPrintingDash ? '#fff' : 'transparent', paddingBottom: '2rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '2rem' }}>
+                    <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', overflow: 'hidden' }}>
+                      <h3 style={{ color: 'var(--green)', borderBottom: '2px solid var(--green)', paddingBottom: '0.5rem', marginBottom: '1rem', textAlign: 'center' }}>
+                        Gráfico Pizza das Receitas
+                      </h3>
+                      <div style={{ height: 400, width: '100%', display: 'flex', justifyContent: 'center' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie data={pieReceitas} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={60} outerRadius={120}>
+                              {pieReceitas.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                            </Pie>
+                            <Tooltip formatter={(value) => BRL(value)} />
+                            <Legend
+                              payload={pieReceitas.map((item, index) => ({ id: item.name, type: 'circle', value: item.name, color: COLORS[index % COLORS.length] }))}
+                              layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ fontSize: '0.8rem' }}
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', overflow: 'hidden' }}>
+                      <h3 style={{ color: 'var(--red)', borderBottom: '2px solid var(--red)', paddingBottom: '0.5rem', marginBottom: '1rem', textAlign: 'center' }}>
+                        Gráfico Pizza das Despesas
+                      </h3>
+                      <div style={{ height: 400, width: '100%', display: 'flex', justifyContent: 'center' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie data={pieDespesas} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={60} outerRadius={120}>
+                              {pieDespesas.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                            </Pie>
+                            <Tooltip formatter={(value) => BRL(value)} />
+                            <Legend
+                              payload={pieDespesas.map((item, index) => ({ id: item.name, type: 'circle', value: item.name, color: COLORS[index % COLORS.length] }))}
+                              layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ fontSize: '0.8rem' }}
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bloco 2: Torres (Será a Quarta Página no PDF) */}
+                <div id="dash-torre" style={{ background: isPrintingDash ? '#fff' : 'transparent', paddingTop: isPrintingDash ? '40px' : '0' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '2rem' }}>
+                    <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', overflow: 'hidden' }}>
+                      <h4 style={{ textAlign: 'center', marginBottom: '1.5rem', color: 'var(--text-dark)', borderBottom: '2px solid var(--green)', paddingBottom: '0.5rem' }}>% Receitas por Departamento</h4>
+                      <div style={{ height: 350, width: '100%' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RechartsBarChart data={pieReceitas} margin={{ top: 20, right: 20, left: -20, bottom: 60 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                            <XAxis dataKey="name" angle={-45} textAnchor="end" height={60} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} />
+                            <YAxis tickFormatter={(val) => `${val}%`} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} />
+                            <Tooltip formatter={(value) => `${value}%`} cursor={{ fill: '#f3f4f6' }} />
+                            <Bar dataKey="perc" radius={[4, 4, 0, 0]}>
+                              {pieReceitas.map((entry, index) => <Cell key={`cell-bar-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                            </Bar>
+                          </RechartsBarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div style={{ background: '#fff', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '1.5rem', overflow: 'hidden' }}>
+                      <h4 style={{ textAlign: 'center', marginBottom: '1.5rem', color: 'var(--text-dark)', borderBottom: '2px solid var(--red)', paddingBottom: '0.5rem' }}>% Despesas por Departamento</h4>
+                      <div style={{ height: 350, width: '100%' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RechartsBarChart data={pieDespesas} margin={{ top: 20, right: 20, left: -20, bottom: 60 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                            <XAxis dataKey="name" angle={-45} textAnchor="end" height={60} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} />
+                            <YAxis tickFormatter={(val) => `${val}%`} tick={{ fontSize: 10, fill: '#6B7280' }} axisLine={false} tickLine={false} />
+                            <Tooltip formatter={(value) => `${value}%`} cursor={{ fill: '#f3f4f6' }} />
+                            <Bar dataKey="perc" radius={[4, 4, 0, 0]}>
+                              {pieDespesas.map((entry, index) => <Cell key={`cell-bar-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                            </Bar>
+                          </RechartsBarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
 
